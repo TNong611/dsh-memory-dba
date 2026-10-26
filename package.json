@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory-dba",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "File-based, git-portable long-term memory for DeepSeek Harness: core/stream/workspace layers, BM25 retrieval with CJK bigrams, two-section prompt injection",
   "license": "MIT",
   "repository": {

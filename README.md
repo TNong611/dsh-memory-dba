@@ -44,9 +44,16 @@ These are real capabilities of the original Python system, not hypothetical futu
 
 ### 3. Research not yet accepted for use in the overall DBA project
 
+Two state interfaces were tried, and neither validates the other:
+
+- **(A) Memory-token prefix.** A frozen RWKV-7 state passes through an adapter into *k* continuous tokens at the LLM hidden width, which are concatenated in front of the instruction embeddings of a frozen Qwen2.5. Only the adapter and the output head train, on downstream task error — no text is produced in between. This is the interface the architecture-judgment experiment tested: best 0.5477 against a direct-MLP baseline of 0.6774 on 50 sealed test episodes, and the ablation (correct vs wrong-episode vs zero vs random tokens) shows the tokens carry episode-specific information. It is not yet accepted either: the rank among token counts is unsettled, the 64-token seeds are incomplete, and on a small 192k-sample budget memory tokens still trail the MLP baseline — they overtake only after enough training data.
+- **(B) State-to-text slot decoding.** A decoder turns the state into four readable slots and the text is fed onward. All six rounds failed acceptance (best 9/1773 all-slot exact). **Every `0/1779` figure on this page belongs to (B) only and says nothing about (A).**
+
+What the DBA runtime actually uses today is a third path: text summaries plus retrieval. It is neither (A) nor (B).
+
 | Research item | Actual state |
 |---|---|
-| Decoding RWKV state into reliable slots or memory codes | State-decoder training experiments were performed on frozen RWKV features, but they did not reach the acceptance standard. The v4 decoder run completed 5,000 steps; on dev (1,779 cases) all-slot exact matches were **0/1779** and content-slot accuracy was 1.6%. The state itself was not useless: true-state token loss 1.185 beat no-state 1.575 and wrong-state 1.260, and per-label linear probes on the same pooled features reached AUC 0.98 — the information is present, the joint multi-label decode is what fails. It was judged **Not qualified** and never entered the final test. There is no usable state-to-slot decoder today. |
+| Decoding RWKV state into readable text slots (route B) | State-decoder training experiments were performed on frozen RWKV features, but they did not reach the acceptance standard. The v4 decoder run completed 5,000 steps; on dev (1,779 cases) all-slot exact matches were **0/1779** and content-slot accuracy was 1.6%. The state itself was not useless: true-state token loss 1.185 beat no-state 1.575 and wrong-state 1.260, and per-label linear probes on the same pooled features reached AUC 0.98 — the information is present, the joint multi-label decode is what fails. It was judged **Not qualified** and never entered the final test. There is no usable state-to-text decoder today. |
 | Cross-model consumption of state | Cloud models consume text summaries and retrieved text, not RWKV state tensors or dedicated memory codes. The interface is not built. |
 | A genuinely resident service | RWKV runs through a local runner/bridge. Continuity across turns is not the same as an accepted always-on service; no resident deployment has been accepted. |
 
@@ -70,7 +77,7 @@ Read these before relying on the plugin as shared or historical memory.
 
 ## Release notes
 
-`0.1.2` through `0.1.4` are documentation-only revisions. No runtime source file or behavior changed in either release; the changes are the scope tables, the limits above, and the corrected release history, so that the npm page matches what is actually delivered. See `CHANGELOG.md` for the full history.
+`0.1.2` through `0.1.5` are documentation-only revisions. No runtime source file or behavior changed in either release; the changes are the scope tables, the limits above, and the corrected release history, so that the npm page matches what is actually delivered. See `CHANGELOG.md` for the full history.
 
 ## Install
 

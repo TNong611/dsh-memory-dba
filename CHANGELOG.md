@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.5 — 2026-10-26
+
+Documentation-only revision. No runtime source file, API, or behavior changed.
+
+- Separated the two state interfaces that the earlier scope text merged into one:
+  **(A) memory-token prefix** (frozen RWKV state → *k* continuous tokens prepended
+  to a frozen LLM's instruction embeddings, trained on downstream task error) and
+  **(B) state-to-text slot decoding** (state → four readable slots → text).
+- Recorded route (A)'s actual standing: 0.5477 vs 0.6774 direct-MLP baseline on 50
+  sealed test episodes, episode-specific per the correct/wrong/zero/random ablation,
+  but token-count ranking unsettled, 64-token seeds incomplete, and behind the MLP
+  baseline on a 192k-sample budget.
+- Bounded every `0/1779` figure to route (B), and named the runtime's actual third
+  path: text summaries plus retrieval.
+
 ## 0.1.4 — 2026-10-26
 
 Documentation-only revision. No runtime source file, API, or behavior changed.
