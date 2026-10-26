@@ -1,0 +1,36 @@
+{
+  "name": "dsh-memory-dba",
+  "version": "0.1.0",
+  "description": "File-based, git-portable long-term memory for DeepSeek Harness: core/stream/workspace layers, BM25 retrieval with CJK bigrams, two-section prompt injection",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./store": "./src/store.mjs",
+    "./search": "./src/search.mjs",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "dsh-memory-dba": "bin/cli.mjs"
+  },
+  "files": [
+    "src",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "memory",
+    "agent-memory",
+    "bm25"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}
