@@ -46,7 +46,7 @@ These are real capabilities of the original Python system, not hypothetical futu
 
 | Research item | Actual state |
 |---|---|
-| Decoding RWKV state into reliable slots or memory codes | State-decoder training experiments were performed on frozen RWKV features, but they did not reach the acceptance standard. The v4 decoder run completed 5,000 steps; on dev, all-slot exact matches were 0/1779, and the final no-state loss was better than the true-state loss. It was judged **Not qualified** and never entered the final test. There is no usable state-to-slot decoder today. |
+| Decoding RWKV state into reliable slots or memory codes | State-decoder training experiments were performed on frozen RWKV features, but they did not reach the acceptance standard. The v4 decoder run completed 5,000 steps; on dev (1,779 cases) all-slot exact matches were **0/1779** and content-slot accuracy was 1.6%. The state itself was not useless: true-state token loss 1.185 beat no-state 1.575 and wrong-state 1.260, and per-label linear probes on the same pooled features reached AUC 0.98 — the information is present, the joint multi-label decode is what fails. It was judged **Not qualified** and never entered the final test. There is no usable state-to-slot decoder today. |
 | Cross-model consumption of state | Cloud models consume text summaries and retrieved text, not RWKV state tensors or dedicated memory codes. The interface is not built. |
 | A genuinely resident service | RWKV runs through a local runner/bridge. Continuity across turns is not the same as an accepted always-on service; no resident deployment has been accepted. |
 
@@ -70,7 +70,7 @@ Read these before relying on the plugin as shared or historical memory.
 
 ## Release notes
 
-`0.1.2` and `0.1.3` are documentation-only revisions. No runtime source file or behavior changed in either release; the changes are the scope tables, the limits above, and the corrected release history, so that the npm page matches what is actually delivered. See `CHANGELOG.md` for the full history.
+`0.1.2` through `0.1.4` are documentation-only revisions. No runtime source file or behavior changed in either release; the changes are the scope tables, the limits above, and the corrected release history, so that the npm page matches what is actually delivered. See `CHANGELOG.md` for the full history.
 
 ## Install
 

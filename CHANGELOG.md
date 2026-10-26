@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.4 — 2026-10-26
+
+Documentation-only revision. No runtime source file, API, or behavior changed.
+
+- Corrected an inverted research claim. `0.1.2`/`0.1.3` said the v4 state decoder's
+  no-state loss was better than its true-state loss. The recorded run says the
+  opposite: on dev (1,779 cases) true-state token loss was **1.185**, against
+  **1.575** with no state and **1.260** with a mismatched state. The decoder fails
+  on joint multi-label extraction (all-slot exact 0/1779, content-slot accuracy
+  1.6%), not because the frozen state carries no signal; per-label linear probes
+  on the same pooled features reach AUC 0.98.
+- `README.zh-CN.md` now carries the same corrected numbers.
+
 ## 0.1.3 — 2026-10-26
 
 Documentation-only revision. No runtime source file, API, or behavior changed.
@@ -29,8 +42,9 @@ Documentation-only revision. No runtime source file, API, or behavior changed.
   failures without retry; and the default memory directory differing from the old
   Python DBA, which requires an explicit `home` to reuse an existing library.
 - Corrected the research status: state-decoder training on frozen RWKV features was performed (v4, 5,000 steps)
-  but did not meet acceptance (dev all-slot exact 0/1779, no-state loss better than
-  true-state, Not qualified, no final test). It is not described as untrained.
+  but did not meet acceptance (dev all-slot exact 0/1779, Not qualified, no final
+  test). It is not described as untrained. This entry originally also claimed the
+  no-state loss beat the true-state loss; that was wrong and is superseded by 0.1.4.
 
 ## 0.1.1 — 2026-10-26
 
