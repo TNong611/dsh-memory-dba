@@ -15,8 +15,11 @@
 
 import { buildCore, buildHits } from './assemble.mjs'
 import { fitHits, loadCorpus, search } from './search.mjs'
-import { ensureLayout, fingerprint, resolveHome } from './store.mjs'
+import { bytes, ensureLayout, fingerprint, resolveHome } from './store.mjs'
 import { appendTurn } from './stream.mjs'
+import { queryTerms, tokenize } from './tokenize.mjs'
+import { embed } from './embed.mjs'
+import { docKey, semanticRecall } from './vector.mjs'
 
 export const name = 'memory-dba'
 
@@ -36,6 +39,7 @@ export const defaults = {
   exclude: [],
   coreOrder: -50,
   hitsOrder: 200,
+  vector: { enabled: true, url: 'http://127.0.0.1:11434', model: 'bge-m3', timeoutMs: 1500, minScore: 0.45, keepAlive: '30m' },
 }
 
 /** Text of one message's content blocks, ignoring tool calls and images. */
@@ -59,6 +63,15 @@ function num(value, fallback, { min = -Infinity, max = Infinity } = {}) {
 /** Merge user config over defaults, rejecting unusable values instead of propagating NaN. */
 export function normalizeConfig(config = {}) {
   const cfg = { ...defaults, ...config }
+  const vector = cfg.vector && typeof cfg.vector === 'object' ? cfg.vector : {}
+  const timeoutMs = vector.timeoutMs == null ? NaN : Number(vector.timeoutMs)
+  const minScore = vector.minScore == null ? NaN : Number(vector.minScore)
+  const keepAlive = typeof vector.keepAlive === 'string' && vector.keepAlive.trim() ? vector.keepAlive.trim() : defaults.vector.keepAlive
+  let url = defaults.vector.url
+  try {
+    const parsed = new URL(vector.url)
+    if (['http:', 'https:'].includes(parsed.protocol)) url = parsed.href.replace(/\/$/, '')
+  } catch {}
   return {
     ...cfg,
     home: typeof cfg.home === 'string' ? cfg.home : '',
@@ -72,7 +85,30 @@ export function normalizeConfig(config = {}) {
     writeStream: cfg.writeStream !== false,
     tag: typeof cfg.tag === 'string' ? cfg.tag : '',
     exclude: Array.isArray(cfg.exclude) ? cfg.exclude.filter(name => typeof name === 'string') : [],
+    vector: {
+      enabled: vector.enabled !== false,
+      url,
+      model: typeof vector.model === 'string' && vector.model.trim() ? vector.model : defaults.vector.model,
+      timeoutMs: Number.isFinite(timeoutMs) && timeoutMs >= 1 ? Math.floor(timeoutMs) : defaults.vector.timeoutMs,
+      minScore: Number.isFinite(minScore) && minScore >= 0 && minScore <= 1 ? minScore : defaults.vector.minScore,
+      keepAlive,
+    },
   }
+}
+
+export function recall(docs, query, options = {}) {
+  const first = search(docs, query, options)
+  const terms = queryTerms(query)
+  const shared = docs.some(doc => tokenize(doc.text).some(term => terms.has(term)))
+  if (!shared && (!first.hits.length || first.hits[0].score < 6)) {
+    const reduced = tokenize(query)
+      .filter(term => !/^[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]{2}$/.test(term))
+      .join(' ')
+      || [...query].filter(char => /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/.test(char)).join(' ')
+    const second = reduced ? search(docs, reduced, options) : { hits: [] }
+    if (second.hits.length) return { ...second, relaxed: true }
+  }
+  return { ...first, relaxed: false }
 }
 
 /**
@@ -88,6 +124,13 @@ export function apply(ctx, config = {}) {
   } catch (error) {
     // An unwritable home disables persistence but must not break startup.
     console.error(`[memory-dba] cannot initialize ${home}: ${error.message}`)
+  }
+
+  // A cold Ollama takes longer than the synchronous recall budget, so warm it in the
+  // background; the first turn would otherwise lose semantic recall.
+  if (cfg.vector.enabled) {
+    embed('warmup', { url: cfg.vector.url, model: cfg.vector.model, timeoutMs: 8000, keepAlive: cfg.vector.keepAlive })
+      .catch(() => {})
   }
 
   let corpus = null
@@ -106,20 +149,33 @@ export function apply(ctx, config = {}) {
     return corpus
   }
 
-  const recall = query => {
+  const recallQuery = query => {
     if (!query) return { hits: [], applied: false, clipped: false }
-    const result = search(docs(), query, {
+    const corpus = docs()
+    const semantic = cfg.vector.enabled
+      ? semanticRecall(home, query, corpus.map(doc => docKey(doc.text)), { ...cfg.vector, topK: cfg.topK })
+      : null
+    const result = recall(corpus, query, {
       topK: cfg.topK,
       timeDecay: cfg.timeDecay,
       halfLifeDays: cfg.halfLifeDays,
       budgetBytes: cfg.hitBudgetKB * 1024,
+      semantic,
+      semanticMinScore: cfg.vector.minScore,
     })
-    const hits = fitHits(result.hits, Math.max(1, cfg.hitBudgetKB) * 1024)
+    const budget = Math.max(1, cfg.hitBudgetKB) * 1024
+    const keyword = result.hits.filter(hit => !hit.semantic)
+    const semanticHits = result.hits.filter(hit => hit.semantic)
+    // Keyword hits own the prompt; semantic excerpts get a reserved tail so a long
+    // workspace section cannot crowd them out entirely.
+    const keptKeyword = fitHits(keyword, semanticHits.length ? Math.floor(budget * 0.7) : budget)
+    const used = keptKeyword.reduce((total, hit) => total + bytes(hit.text) + 48, 0)
+    const hits = used < budget ? keptKeyword.concat(fitHits(semanticHits, budget - used)) : keptKeyword
     return { ...result, hits }
   }
 
   const renderHits = query => {
-    const result = recall(query)
+    const result = recallQuery(query)
     return buildHits(result.hits, { budgetKB: cfg.hitBudgetKB })
   }
 

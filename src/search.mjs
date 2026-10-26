@@ -13,6 +13,7 @@ import { readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { bytes, readLayer } from './store.mjs'
 import { queryTerms, tokenize } from './tokenize.mjs'
+import { docKey } from './vector.mjs'
 
 const K1 = 1.5
 const B = 0.75
@@ -120,6 +121,8 @@ export function loadCorpus(home, { exclude = [], strict = false } = {}) {
  * @property {number} [halfLifeDays] Weight halves every N days.
  * @property {string} [now] Reference date, ISO; defaults to today.
  * @property {number} [budgetBytes] Rerank only when matching candidates exceed this budget.
+ * @property {Map<string, number>|null} [semantic] Cosines keyed by document-text SHA-1.
+ * @property {number} [semanticMinScore] Cosine floor for appended semantic hits, default 0.45.
  */
 
 /**
@@ -127,14 +130,14 @@ export function loadCorpus(home, { exclude = [], strict = false } = {}) {
  *
  * @param {MemoryDoc[]} docs Corpus.
  * @param {string} query User query.
- * @param {{ topK?: number, timeDecay?: boolean, halfLifeDays?: number, now?: string, budgetBytes?: number }} [options]
+ * @param {SearchOptions & { topK?: number }} [options]
  * @returns {{ hits: Array<MemoryDoc & { score: number, base: number }>, applied: boolean, corpusDates: {dated: number, undated: number} }}
  */
 export function search(docs, query, options = {}) {
   const topK = Math.max(1, options.topK ?? 5)
   const terms = queryTerms(query)
   const empty = { hits: [], applied: false, corpusDates: { dated: 0, undated: 0 } }
-  if (!terms.size || !docs.length) return empty
+  if ((!terms.size && !options.semantic?.size) || !docs.length) return empty
 
   const postings = new Map()
   const lengths = new Array(docs.length)
@@ -163,10 +166,27 @@ export function search(docs, query, options = {}) {
       scores.set(i, (scores.get(i) || 0) + gain)
     }
   }
-  if (!scores.size) return empty
+  const keys = options.semantic?.size ? docs.map(doc => docKey(doc.text)) : null
+  /** Semantic hits extend the keyword list; they never reorder it. */
+  const extras = picked => {
+    if (!keys) return picked
+    const minimum = Number.isFinite(options.semanticMinScore) ? options.semanticMinScore : 0.45
+    const seen = new Set(picked.map(hit => docKey(hit.text)))
+    const found = []
+    for (let index = 0; index < docs.length; index += 1) {
+      if (seen.has(keys[index])) continue
+      const score = options.semantic.get(keys[index])
+      if (Number.isFinite(score) && score >= minimum) found.push({ index, score })
+    }
+    found.sort((left, right) => right.score - left.score || left.index - right.index)
+    return picked.concat(found
+      .slice(0, topK)
+      .map(({ index, score }) => ({ ...docs[index], score: score * 10, base: score * 10, semantic: true })))
+  }
+  let ranked = [...scores.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])
+  if (!ranked.length) return { ...empty, hits: extras([]) }
 
-  const base = [...scores.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+  const base = ranked
     .map(([i, score]) => ({ ...docs[i], score, base: score }))
 
   const dated = base.filter(hit => hit.date)
@@ -175,7 +195,7 @@ export function search(docs, query, options = {}) {
   const withinBudget = Number.isFinite(options.budgetBytes)
     && base.reduce((total, hit) => total + bytes(hit.text) + 48, 0) <= options.budgetBytes
   if (!options.timeDecay || !dated.length || withinBudget) {
-    return { hits: base.slice(0, topK), applied: false, corpusDates }
+    return { hits: extras(base.slice(0, topK)), applied: false, corpusDates }
   }
 
   const reference = options.now ? Date.parse(options.now) : Date.now()
@@ -188,11 +208,11 @@ export function search(docs, query, options = {}) {
   const sortedWeights = [...weights.values()].sort((a, b) => a - b)
   const neutral = sortedWeights[Math.floor(sortedWeights.length / 2)]
   const reranked = base
-    .map(hit => ({ ...hit, weight: weights.get(hit) ?? neutral }))
-    .sort((a, b) => b.base * b.weight - a.base * a.weight)
-    .map(({ weight, ...hit }) => ({ ...hit, score: hit.base * weight }))
+    .map((hit, index) => ({ ...hit, weight: weights.get(hit) ?? neutral, docIndex: ranked[index][0] }))
+    .sort((left, right) => right.base * right.weight - left.base * left.weight || left.docIndex - right.docIndex)
+    .map(({ weight, docIndex, ...hit }) => ({ ...hit, score: hit.base * weight }))
 
-  return { hits: reranked.slice(0, topK), applied: true, corpusDates, timeWeightNeutral: neutral }
+  return { hits: extras(reranked.slice(0, topK)), applied: true, corpusDates, timeWeightNeutral: neutral }
 }
 
 /**

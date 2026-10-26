@@ -10,7 +10,7 @@ stream.md        one line per finished turn, retrieved only
 ws/<area>.md     detail notes, retrieved only
 ```
 
-Everything lives in one directory. Copy it, put it in git, point two harness installs at the same folder, or read it with `cat`. There is no database and no embedding service.
+Everything lives in one directory. Copy it, put it in git, point two harness installs at the same folder, or read it with `cat`. There is no database or required embedding service.
 
 ## Install
 
@@ -54,6 +54,14 @@ The plugin hooks two prompt sections and the session event stream. Nothing else 
 | `exclude` | `[]` | Workspace file names to keep out of retrieval, e.g. role-play notes. |
 | `coreOrder` | `-50` | Prompt section order for the core layer. |
 | `hitsOrder` | `200` | Prompt section order for retrieval hits. |
+| `vector.enabled` | `true` | Try optional semantic recall when a cache exists. |
+| `vector.url` | `http://127.0.0.1:11434` | Ollama embedding server. |
+| `vector.model` | `bge-m3` | Model used for indexing and queries. |
+| `vector.timeoutMs` | `1500` | Total synchronous worker-join budget in milliseconds; also caps the embedding request. |
+| `vector.minScore` | `0.45` | Cosine floor for an appended semantic hit. |
+| `vector.keepAlive` | `30m` | Passed to Ollama so the model stays resident between turns. |
+
+Partial `vector` objects inherit unspecified defaults. Set `vector: { enabled: false }` to disable semantic recall entirely.
 
 ## Why two prompt sections
 
@@ -76,13 +84,35 @@ Core and stream entries split per non-empty line. Workspace headings and blank l
 
 For predictable stream retrieval latency, only the most recent **1,000 non-empty stream entries**, within **128 KiB of entry text**, are indexed. Individual entries larger than 128 KiB are skipped. Earlier entries remain on disk; move lasting details into `ws/*.md` to keep them searchable. Core and workspace documents are not capped. A 5 MiB mixed Chinese/English stream is covered by a cold-load-plus-search benchmark test targeting 300 ms; actual timing depends on hardware. Reading and UTF-8 validation still scan the whole stream, so this is not a constant-time guarantee for arbitrarily large files.
 
-Vector search is not included. It needs a local embedding server, and this package's point is to run on a bare Node install.
+If the first query finds no shared term, recall retries once with CJK unigrams plus Latin words. Existing shared-term hits are never relaxed. The result reports `relaxed: true` only when the retry supplies hits; there are at most two ranking attempts.
+
+## Semantic recall (optional)
+
+BM25 always works on a bare Node install. To add semantic recall, install an Ollama embedding model separately, then build the derived cache:
+
+```bash
+ollama pull bge-m3
+dsh-memory-dba index --home ./memory --url http://127.0.0.1:11434 --model bge-m3
+```
+
+Indexing uses four concurrent requests. Duplicate document texts share one entry (reported as skipped). Rebuild after editing memory; unchanged text still matches, while uncached or changed documents remain searchable by BM25. Indexing refuses with exit code 2 if the embedder is unavailable, without replacing the previous cache. Indexing requests have a separate 30-second timeout so model startup does not consume the recall budget.
+
+The portable `<home>/.vec/embeddings.json` cache stores version, model, dimension, and SHA-1 document-text keys, never document paths. Each vector is quantized to signed int8 with its own `max(abs(vector)) / 127` scale and base64 bytes. `bge-m3` normally uses 1024 dimensions; the cache records the actual model dimension.
+
+On each user message, a lazily reused, unreferenced worker embeds the query using `/api/embed` (falling back once to `/api/embeddings` on HTTP 404), then compares it with cached vectors by cosine similarity. Only document keys are sent, not corpus text. A fresh shared buffer returns at most eight matching corpus indices and scores. The main thread joins synchronously using `Atomics.wait`, with a **1500 ms total budget**, including worker startup and message posting. Prompt section callbacks remain synchronous; no background result mutates a later turn's hits.
+
+Keyword ranking is never rewritten by semantics. Hits above `minScore` that keywords missed are **appended** after the keyword hits, marked `(semantic)`, and cut to a 600-byte excerpt; the prompt budget keeps at most 70% for keyword hits so a long workspace section cannot crowd them out entirely. Fusion of the two rankings was tried and rejected: with no score floor, a semantic table of contents outranked an exact keyword match.
+
+A cold `bge-m3` takes about two seconds to load, longer than the join budget, so the plugin fires one background warmup request when it mounts and asks Ollama to keep the model resident for `keepAlive`. After a failed or timed-out lookup the endpoint is skipped for 60 seconds, which keeps a down or cold embedder from costing the budget on every turn.
+
+Missing caches, unavailable models (including Ollama HTTP 404), network errors, model/dimension mismatches, corrupt caches, and timeouts silently degrade to BM25 during recall. No model is installed automatically. `doctor` reports vector entry counts and corpus coverage; a missing cache is optional even without an embedder, while a corrupt cache fails the vector check. `stats` includes cache bytes when present.
 
 ## CLI
 
 ```bash
 dsh-memory-dba init                     # create the directory and layer files
 dsh-memory-dba recall "clock drift"     # what retrieval would return
+dsh-memory-dba index                    # build optional semantic cache
 dsh-memory-dba write --user "..." --assistant "..."
 dsh-memory-dba stats                    # bytes per layer
 dsh-memory-dba doctor                   # layout, budget, corpus, retrieval checks
