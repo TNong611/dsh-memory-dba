@@ -17,7 +17,11 @@ Everything lives in one directory. Copy it, put it in git, point two harness ins
 Install it into the profile directory the harness runs from (`~/.dsh/profiles/<name>/`), so the loader can resolve the package name:
 
 ```bash
+# from the npm registry
 npm install dsh-memory-dba --prefix ~/.dsh/profiles/web
+
+# or straight from GitHub
+npm install github:TNong611/dsh-memory-dba --prefix ~/.dsh/profiles/web
 ```
 
 Then append one entry to the `insert:` list in that profile's `cordis.patch.yml`:
