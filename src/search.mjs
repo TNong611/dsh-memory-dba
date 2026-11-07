@@ -9,11 +9,12 @@
  * that already matched.
  */
 
-import { readdirSync, statSync } from 'node:fs'
+import { lstatSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { bytes, readLayer } from './store.mjs'
 import { queryTerms, tokenize } from './tokenize.mjs'
 import { docKey } from './vector.mjs'
+import { readCatalog, effectiveFacts } from './catalog.mjs'
 
 const K1 = 1.5
 const B = 0.75
@@ -27,7 +28,12 @@ const DATE_RE = /(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/
 
 /**
  * Split one layer into retrievable units. Core and stream split per non-empty
- * line; a workspace file splits per `##` heading so a long note is one hit.
+ * line; a workspace source still splits per `##` heading for callers that pass
+ * one explicitly.
+ *
+ * Retrieval does NOT use this for workspace files: level-1 workspace documents
+ * are name-only (see `wsDoc`), because a section of workspace text in the
+ * corpus is exactly what the two-level design keeps out of the prompt.
  *
  * @param {string} text Layer contents.
  * @param {string} source Layer label used in results.
@@ -59,6 +65,41 @@ export function splitDocs(text, source) {
   return docs
 }
 
+/**
+ * First-line title of a workspace file, or `''` when the first line is not a
+ * level-1 heading (`# ...`).
+ *
+ * Only the first physical line counts. Workspace bodies contain `#` lines in
+ * quotes and code blocks; scanning the whole file for something that looks
+ * like a title would put body text back into the level-1 document.
+ *
+ * @param {string} text Workspace file contents.
+ * @returns {string} Title line, or empty string.
+ */
+export function wsTitle(text) {
+  const first = String(text || '').replace(/^\uFEFF/, '').split(/\r?\n/, 1)[0].trim()
+  return first.startsWith('# ') && !first.startsWith('## ') ? first : ''
+}
+
+/**
+ * Level-1 workspace document: file name plus first-line title, never the body.
+ *
+ * Rationale: at level 1 retrieval may answer "which workspace note might be
+ * relevant", not "what does it say". Indexing the body means any unrelated
+ * query can pull a whole workspace section into the prompt. Reading the body
+ * is an explicit second step (`nb_search.py --file <area>`), which is also why
+ * `date` is null here: without a body there is no section date to weight.
+ *
+ * @param {string} name Workspace file name, e.g. `记忆系统.md`.
+ * @param {string} text Workspace file contents.
+ * @returns {MemoryDoc} Name-only document.
+ */
+export function wsDoc(name, text) {
+  const source = `ws/${name}`
+  const title = wsTitle(text)
+  return { source, line: 1, text: title ? `${source}\n${title}` : source, date: null }
+}
+
 /** First `YYYY-MM-DD[ HH:MM]` in the text, normalized to an ISO date string. */
 export function dateOf(text) {
   const m = DATE_RE.exec(text || '')
@@ -85,16 +126,22 @@ function streamDocs(text) {
   return docs.reverse()
 }
 
-/** Unavailable or invalid layers are skipped unless strict diagnostics are requested. */
-export function loadCorpus(home, { exclude = [], strict = false } = {}) {
+/**
+ * Unavailable or invalid layers are skipped unless strict diagnostics are requested.
+ *
+ * `core.md` is deliberately **not** part of the retrieval corpus. It is injected
+ * in full every turn by `buildCore`, so indexing it here would let the same text
+ * consume the prompt budget twice — the exact rule the Python side follows
+ * (`nb_search.py` excludes `scope === "core"` by default). A broken `core.md`
+ * is still reported by the core-budget check and by `buildCore` throwing, not by
+ * pretending it was a retrievable document.
+ */
+export function loadCorpus(home, { exclude = [], strict = false, includeHistory = false } = {}) {
   const docs = []
-  for (const [file, label] of [['core.md', 'core'], ['stream.md', 'stream']]) {
-    try {
-      const text = readLayer(home, file)
-      docs.push(...(label === 'stream' ? streamDocs(text) : splitDocs(text, label)))
-    } catch (error) {
-      if (strict && error?.name !== 'MissingLayer') throw error
-    }
+  try {
+    docs.push(...streamDocs(readLayer(home, 'stream.md')))
+  } catch (error) {
+    if (strict && error?.name !== 'MissingLayer') throw error
   }
   const wsDir = join(home, 'ws')
   let names = []
@@ -107,9 +154,38 @@ export function loadCorpus(home, { exclude = [], strict = false } = {}) {
   for (const name of names) {
     if (skip.has(name)) continue
     try {
-      docs.push(...splitDocs(readLayer(home, `ws/${name}`), `ws/${name}`))
+      const fileStat = lstatSync(join(wsDir, name))
+      if (fileStat.isSymbolicLink() || !fileStat.isFile()) {
+        if (strict) throw new Error(`workspace entry must be a regular file: ${name}`)
+        continue
+      }
+      // One name-only document per file. `exclude` stays as an extra guardrail;
+      // the real gate is that no workspace body ever enters this corpus.
+      const doc = wsDoc(name, readLayer(home, `ws/${name}`))
+      docs.push(doc)
     } catch (error) {
       if (strict && error?.name !== 'MissingLayer') throw error
+    }
+  }
+  let catalog
+  try { catalog = readCatalog(home, { strict }) }
+  catch (error) { console.error(`[memory-dba] ${error.message}`); if (strict) throw error }
+  if (catalog) {
+    const cards = new Map(catalog.cards.map(card => [card.file, card]))
+    for (const doc of docs) {
+      const card = cards.get(doc.source)
+      if (!card || exclude.includes(doc.source) || exclude.includes(doc.source.slice(3))) continue
+      const labels = [['topics','topics'],['aliases','aliases'],['entities','entities'],['questions','questions']]
+        .filter(([key]) => card[key].length).map(([key,label]) => `${label}: ${card[key].join(', ')}`)
+      if (labels.length) doc.text += `\n${labels.join('\n')}`
+    }
+    const superseded = new Set(catalog.facts.flatMap(f => f.supersedes))
+    const eff = effectiveFacts(catalog, { history: includeHistory })
+    for (const fact of eff) {
+      if (!includeHistory && fact.effective_status !== 'active' && fact.effective_status !== 'conflict') continue
+      const evidence = fact.source.role === 'user' ? 'user_reported' : 'assistant_reported'
+      const text = `key: ${fact.key}\nclaim: ${fact.claim}\nkind: ${fact.kind}\nsource: ${evidence}\nevent: ${fact.source.event_id}\nstatus: ${fact.effective_status}`
+      docs.push({ source: `fact/${fact.id}`, line: 1, text, date: fact.observed_at, evidence: { ...fact.source }, source_label: evidence, factStatus: fact.effective_status, effective_status: fact.effective_status, conflict: fact.effective_status === 'conflict', key: fact.key, claim: fact.claim, kind: fact.kind, factKey: fact.key, superseded: superseded.has(fact.id) })
     }
   }
   return docs

@@ -139,11 +139,21 @@ test('recall never relaxes shared-term hits and retries CJK unigrams just once',
 
 test('vector configuration merges partial objects and rejects invalid values', () => {
   const baseline = normalizeConfig().vector
-  assert.deepEqual(baseline, { enabled: true, url: 'http://127.0.0.1:11434', model: 'bge-m3', timeoutMs: 1500, minScore: 0.45, keepAlive: '30m' })
+  assert.deepEqual(baseline, { enabled: false, url: 'http://127.0.0.1:11434', model: 'bge-m3', timeoutMs: 1500, minScore: 0.45, keepAlive: '30m' })
+  assert.deepEqual(normalizeConfig({ vector: { enabled: true } }).vector, { ...baseline, enabled: true })
   assert.deepEqual(normalizeConfig({ vector: { enabled: false } }).vector, { ...baseline, enabled: false })
   assert.deepEqual(normalizeConfig({ vector: { url: null, model: '', timeoutMs: 'bad', minScore: 2, keepAlive: '' } }).vector, baseline)
   assert.deepEqual(normalizeConfig({ vector: null }).vector, baseline)
   assert.deepEqual(normalizeConfig({ vector: { url: 'http://', timeoutMs: 0, weight: -1 } }).vector, baseline)
+  // detailHint: empty means derive from home; a string is used verbatim.
+  assert.equal(normalizeConfig().detailHint, '')
+  assert.equal(normalizeConfig({ detailHint: 'custom' }).detailHint, 'custom')
+  assert.equal(normalizeConfig({ detailHint: 3 }).detailHint, '')
+  // New per-session/cold-path defaults.
+  assert.equal(normalizeConfig().coreRefresh, 'session')
+  assert.equal(normalizeConfig({ coreRefresh: 'always' }).coreRefresh, 'always')
+  assert.equal(normalizeConfig({ coreRefresh: 'bad' }).coreRefresh, 'session')
+  assert.equal(normalizeConfig().coldHint, '')
 })
 
 test('worker bridge returns key-aligned scores and bounds server-down and timeout paths', async context => {
@@ -189,21 +199,61 @@ test('worker bridge returns key-aligned scores and bounds server-down and timeou
   context.diagnostic(`worker success ${successMs.toFixed(1)}ms; 100ms timeout ${timeoutMs.toFixed(1)}ms; default timeout ${defaultMs.toFixed(1)}ms; server-down ${downMs.toFixed(1)}ms; cooldown repeat ${repeatMs.toFixed(1)}ms`)
 })
 
+test('default config never calls the vector runtime; explicit opt-in does', () => {
+  const home = tempHome()
+  ensureLayout(home)
+  writeFileSync(join(home, 'stream.md'), '- 2026-11-03 alpha private apples\n')
+  const calls = { embed: 0, semantic: 0 }
+  const runtime = {
+    vector: {
+      embed: () => { calls.embed += 1; return Promise.resolve(fixed) },
+      semanticRecall: () => { calls.semantic += 1; return null },
+    },
+  }
+  const mount = config => {
+    const handlers = new Map()
+    apply({
+      on: (name, handler) => handlers.set(name, handler),
+      systemPrompt: { section: () => {}, context: () => {} },
+    }, { home, ...config }, runtime)
+    return handlers
+  }
+  const userMessage = { type: 'user/message', data: { source: { kind: 'user' }, content: 'alpha' } }
+
+  const disabled = mount({})
+  assert.equal(calls.embed, 0)
+  assert.equal(calls.semantic, 0)
+  disabled.get('session/event')({ id: 'A' }, userMessage)
+  assert.equal(calls.embed, 0)
+  assert.equal(calls.semantic, 0)
+
+  const enabled = mount({ vector: { enabled: true } })
+  assert.equal(calls.embed, 1)
+  enabled.get('session/event')({ id: 'A' }, userMessage)
+  assert.equal(calls.semantic, 1)
+})
+
 test('plugin synchronous prompt injection includes semantic-only matches', async context => {
   const server = new Worker(new URL('./fixtures/embed-server.mjs', import.meta.url))
   context.after(() => server.terminate())
   const [url] = await once(server, 'message')
   const home = tempHome()
   ensureLayout(home)
-  writeFileSync(join(home, 'core.md'), 'semantic memory only\n')
+  // Stream, not core: core is injected in full and stays out of the recall
+  // corpus, so a semantic-only hit has to come from a retrievable layer.
+  writeFileSync(join(home, 'stream.md'), 'semantic memory only\n')
   saveVectorCache(home, cacheFor(['semantic memory only']))
   const sections = []
+  const contexts = []
   const handlers = new Map()
-  apply({ on: (name, handler) => handlers.set(name, handler), systemPrompt: { section: section => sections.push(section) } }, { home, vector: { url, timeoutMs: 1000 } })
+  apply({
+    on: (name, handler) => handlers.set(name, handler),
+    systemPrompt: { section: section => sections.push(section), context: spec => contexts.push(spec) },
+  }, { home, vector: { enabled: true, url, timeoutMs: 1000 } })
   const returned = handlers.get('session/event')({ id: 's' }, { type: 'user/message', data: { source: { kind: 'user' }, content: 'unrelatedquery' } })
   assert.equal(returned, undefined)
-  assert.equal(typeof sections[1].text(), 'string')
-  assert.match(sections[1].text(), /semantic memory only/)
+  assert.equal(typeof contexts[0].text(), 'string')
+  assert.match(contexts[0].text(), /semantic memory only/)
 })
 
 let cliRun = 0
@@ -243,8 +293,8 @@ test('CLI index uses four requests, preserves caches on failure, and diagnoses o
   const url = `http://127.0.0.1:${server.address().port}`
   const home = tempHome()
   ensureLayout(home)
-  writeFileSync(join(home, 'core.md'), 'one\ntwo\nthree\nfour\nfive\none\n')
-  writeFileSync(join(home, 'stream.md'), '')
+  // The index is built from the recall corpus, which excludes core by design.
+  writeFileSync(join(home, 'stream.md'), 'one\ntwo\nthree\nfour\nfive\none\n')
   const indexed = await cli(['index', '--home', home, '--url', url])
   assert.equal(indexed.code, 0)
   assert.match(indexed.text, /indexed 5 docs in \d+ms \(1 skipped\)/)

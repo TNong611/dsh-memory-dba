@@ -14,6 +14,7 @@
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, platform } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { createHash } from 'node:crypto'
 
 export const CORE_FILE = 'core.md'
 export const STREAM_FILE = 'stream.md'
@@ -158,14 +159,28 @@ export function fingerprint(home) {
   let names = []
   try {
     names = readdirSync(join(home, WS_DIR)).filter(name => name.endsWith('.md')).sort()
-  } catch { /* An unavailable workspace has no cacheable entries. */ }
+  } catch (error) { parts.push(`ws-dir:${error?.code || 'unreadable'}`) }
   for (const name of [CORE_FILE, STREAM_FILE, ...names.map(name => `${WS_DIR}/${name}`)]) {
     try {
       const st = statSync(join(home, name))
       parts.push(JSON.stringify([name, st.size, st.mtimeMs]))
-    } catch {
-      parts.push(`${name}:-`)
+    } catch (error) {
+      parts.push(`${name}:${error?.code || 'unreadable'}`)
     }
   }
+  // Catalog edits and changes to referenced evidence invalidate retrieved facts.
+  const catalogPath = join(home, 'catalog.json')
+  try {
+    const st = statSync(catalogPath)
+    const digest = createHash('sha256').update(readFileSync(catalogPath)).digest('hex')
+    parts.push(JSON.stringify(['catalog.json', st.size, st.mtimeMs, digest]))
+    try {
+      const catalog = JSON.parse(readFileSync(catalogPath, 'utf8'))
+      for (const id of [...new Set((catalog.facts || []).map(f => f?.source?.event_id).filter(x => typeof x === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(x)))].sort()) {
+        try { const path=join(home, 'events-v1', `${id}.json`); const ev = statSync(path); const evHash=createHash('sha256').update(readFileSync(path)).digest('hex'); parts.push(JSON.stringify([`events-v1/${id}.json`, ev.size, ev.mtimeMs, evHash])) }
+        catch { parts.push(`events-v1/${id}.json:-`) }
+      }
+    } catch { parts.push('catalog.json:invalid') }
+  } catch (error) { parts.push(`catalog.json:${error?.code || 'unreadable'}`) }
   return parts.join('|')
 }

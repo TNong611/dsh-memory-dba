@@ -21,6 +21,9 @@ import { isBlankQuery } from '../src/tokenize.mjs'
 import { recall } from '../src/index.mjs'
 import { embed } from '../src/embed.mjs'
 import { docKey, encodeVector, loadVectorCache, saveVectorCache, semanticRecall, MissingVectors, VectorCorrupt } from '../src/vector.mjs'
+import { addFact, effectiveFacts, putCard, readCatalog } from '../src/catalog.mjs'
+import { readFileSync } from 'node:fs'
+import { readEvent } from '../src/events.mjs'
 
 const USAGE = `dsh-memory-dba <command> [options]
 
@@ -31,6 +34,10 @@ Commands:
   stats                      per-layer byte counts
   doctor                     validate layout and retrieval
   index                      build the optional semantic vector cache
+  card-put --input FILE      add or replace one navigation card
+  fact-add --input FILE      add one evidence-checked fact
+  facts [query] [--history]  search facts, optionally including superseded records
+  event --id ID              display one complete evidence event
 
 Options:
   --home DIR                 memory directory (default: DSH_MEMORY_HOME or the platform default)
@@ -50,6 +57,10 @@ async function main() {
       json: { type: 'boolean', default: false },
       url: { type: 'string', default: 'http://127.0.0.1:11434' },
       model: { type: 'string', default: 'bge-m3' },
+      input: { type: 'string', default: '' },
+      id: { type: 'string', default: '' },
+      history: { type: 'boolean', default: false },
+      semantic: { type: 'boolean', default: false },
     },
   })
 
@@ -79,7 +90,7 @@ async function main() {
       const topK = Number(values['top-k'])
       if (!Number.isInteger(topK) || topK < 1) throw new Error('--top-k must be a positive integer')
       const corpus = loadCorpus(home)
-      const semantic = semanticRecall(home, query, corpus.map(doc => docKey(doc.text)), { topK, url: values.url, model: values.model })
+      const semantic = values.semantic ? semanticRecall(home, query, corpus.map(doc => docKey(doc.text)), { topK, url: values.url, model: values.model }) : null
       const result = recall(corpus, query, { topK, semantic })
       const hits = fitHits(result.hits, 6 * 1024)
       emit(
@@ -95,6 +106,38 @@ async function main() {
       const outcome = appendTurn(home, { user: values.user, assistant: values.assistant })
       emit(outcome, outcome.written ? outcome.line : `not written: ${outcome.reason}`)
       if (!outcome.written) process.exitCode = 1
+      break
+    }
+
+    case 'card-put': {
+      if (!values.input) throw new Error('card-put requires --input JSON_FILE')
+      const card = JSON.parse(readFileSync(values.input, 'utf8'))
+      emit(putCard(home, card), `saved card ${card.file}`)
+      break
+    }
+
+    case 'fact-add': {
+      if (!values.input) throw new Error('fact-add requires --input JSON_FILE')
+      const fact = JSON.parse(readFileSync(values.input, 'utf8'))
+      const result = await addFact(home, fact)
+      emit(result, `saved fact ${result.id}`)
+      break
+    }
+
+    case 'facts': {
+      const query = rest.join(' ').trim()
+      const rows = effectiveFacts(readCatalog(home, { strict: true }), { history: values.history })
+      const docs = rows.map(f => ({...f, text: `${f.key} ${f.claim} ${f.kind} ${f.source.role}_reported ${f.source.event_id} ${f.effective_status}`}))
+      const found = query ? search(docs.map((d,i)=>({source:`fact/${d.id}`,line:1,text:d.text,date:d.observed_at,record:d})), query, {topK:1000}).hits.map(h=>h.record) : rows
+      emit(found, found.map(f=>`${f.effective_status} ${f.key}: ${f.claim} [${f.source.role}_reported, event ${f.source.event_id}]`).join('\n') || '(no facts)')
+      break
+    }
+
+    case 'event': {
+      if (!values.id) throw new Error('event requires --id ID')
+      const event = readEvent(home, values.id)
+      if (!event || event.version !== 1 || event.id !== values.id) throw new Error('event not found or invalid')
+      emit(event, JSON.stringify(event, null, 2))
       break
     }
 

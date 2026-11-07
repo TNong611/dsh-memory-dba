@@ -121,28 +121,30 @@ test('fitHits honors the prompt budget and keeps at least one hit', () => {
   assert.equal(fitHits(hits, 1024).length, 1)
 })
 
-test('plugin injects two sections, recalls on user input, and records the turn', () => {
+test('plugin injects core as a section and recall as runtime context, then records the turn', () => {
   const home = tempHome()
   ensureLayout(home)
   writeFileSync(join(home, 'core.md'), '# Core\n\n- prefers terse answers\n', 'utf8')
-  writeFileSync(join(home, 'ws', 'clock.md'), '## Clock\n\n2026-10-22 dual boot RTC offset was eight hours.\n', 'utf8')
+  writeFileSync(join(home, 'stream.md'), '- 2026-10-22 22:48 RTC clock offset: dual boot drifted eight hours\n', 'utf8')
 
   const sections = []
+  const contexts = []
   const handlers = new Map()
   const ctx = {
     on: (event, handler) => handlers.set(event, handler),
-    systemPrompt: { section: spec => sections.push(spec) },
+    systemPrompt: { section: spec => sections.push(spec), context: spec => contexts.push(spec) },
   }
   apply(ctx, { home, topK: 3 })
 
-  assert.deepEqual(sections.map(s => s.name), ['memory-dba:core', 'memory-dba:hits'])
+  assert.deepEqual(sections.map(s => s.name), ['memory-dba:core'])
+  assert.deepEqual(contexts.map(c => c.name), ['memory-dba:hits'])
   assert.match(sections[0].text(), /terse/)
 
   handlers.get('session/event')(
     { id: 's1' },
     { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'RTC clock offset' }] } },
   )
-  assert.match(sections[1].text(), /eight hours/)
+  assert.match(contexts[0].text(), /eight hours/)
 
   handlers.get('session/event')(
     { id: 's1' },
@@ -155,7 +157,10 @@ test('plugin injects two sections, recalls on user input, and records the turn',
 test('plugin initializes a missing memory directory instead of failing', () => {
   const home = join(tempHome(), 'nested', 'memory')
   const sections = []
-  const ctx = { on: () => {}, systemPrompt: { section: spec => sections.push(spec) } }
+  const ctx = {
+    on: () => {},
+    systemPrompt: { section: spec => sections.push(spec), context: () => {} },
+  }
   assert.doesNotThrow(() => apply(ctx, { home }))
   assert.ok(readFileSync(join(home, 'core.md'), 'utf8').startsWith('# Core memory'))
   assert.match(sections[0].text(), /# Core memory/)
